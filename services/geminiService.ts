@@ -1,6 +1,7 @@
+
 import { ChapterOutline, ThumbnailStyle } from "../types";
 import { OUTLINES_PROMPT_TEMPLATE, HOOK_PROMPT_TEMPLATE, CHAPTER_BATCH_PROMPT_TEMPLATE } from "../constants";
-import { callGeminiApi } from "./apiService";
+import { callGeminiApi, callGeminiImageApi } from "./apiService";
 import { Modality, Type } from "@google/genai";
 
 export const generateOutlines = async (title: string, concept: string, duration: number): Promise<string> => {
@@ -100,23 +101,36 @@ export const analyzeImageStyle = async (base64Images: {mimeType: string, data: s
   return JSON.parse(jsonStr) as Omit<ThumbnailStyle, 'id' | 'name'>;
 };
 
-export const generateInitialThumbnail = async (prompt: string, style: ThumbnailStyle): Promise<string> => {
-  const fullPrompt = `${style.masterPrompt} The specific scene to create is: ${prompt}`;
-  
-  const response = await callGeminiApi({
-      model: 'imagen-4.0-generate-001',
-      prompt: fullPrompt,
-      config: {
-        numberOfImages: 1,
-        outputMimeType: 'image/jpeg',
-        aspectRatio: '16:9',
-      },
-  });
+export const generateInitialThumbnail = async (
+  prompt: string,
+  style: ThumbnailStyle
+): Promise<{data: string, mimeType: string}> => {
+  const fullPrompt = `${style.masterPrompt}\n\nThe specific scene to create is: ${prompt}\n\nIMPORTANT: The final output must be only the generated image, with no accompanying text. The image must be 1280x720 pixels (16:9 aspect ratio).`;
 
-  if (!response.generatedImages || response.generatedImages.length === 0) {
-    throw new Error("Image generation failed to produce an image.");
+  const response = await callGeminiApi({
+    model: 'gemini-2.5-flash-image-preview',
+    contents: {
+      parts: [
+        {
+          text: fullPrompt,
+        },
+      ],
+    },
+    config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
+    },
+  });
+  
+  const imagePart = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
+  if (!imagePart || !imagePart.inlineData) {
+    const textPart = response.text;
+    throw new Error(`Image generation failed to return an image. Model response: "${textPart}"`);
   }
-  return response.generatedImages[0].image.imageBytes;
+
+  return {
+    data: imagePart.inlineData.data,
+    mimeType: imagePart.inlineData.mimeType || 'image/png'
+  };
 };
 
 export const editThumbnail = async (
@@ -124,7 +138,7 @@ export const editThumbnail = async (
   mimeType: string,
   instruction: string,
   style: ThumbnailStyle
-): Promise<string> => {
+): Promise<{data: string, mimeType: string}> => {
   const fullInstruction = `Following the overall style guide below, please perform this specific edit: "${instruction}".\n\nSTYLE GUIDE: ${style.masterPrompt}`;
 
   const response = await callGeminiApi({
@@ -152,5 +166,8 @@ export const editThumbnail = async (
     throw new Error("Image editing failed to return an image.");
   }
 
-  return imagePart.inlineData.data;
+  return {
+    data: imagePart.inlineData.data,
+    mimeType: imagePart.inlineData.mimeType || 'image/png' // Default to PNG if mimeType is missing
+  };
 };

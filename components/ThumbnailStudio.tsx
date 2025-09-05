@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo } from 'react';
 import { ScriptJob, ThumbnailStyle } from '../types';
 import { analyzeImageStyle, generateInitialThumbnail, editThumbnail } from '../services/geminiService';
@@ -13,6 +14,7 @@ interface ThumbnailStudioProps {
 }
 
 type StudioStep = 'STYLE_SELECTION' | 'STYLE_CREATION' | 'GENERATION';
+type GenerationMode = 'PROMPT' | 'UPLOAD';
 
 const fileToGenerativePart = async (file: File) => {
   const base64 = await new Promise<string>((resolve, reject) => {
@@ -39,7 +41,10 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
 
   // Generation state
   const [generatedImage, setGeneratedImage] = useState<{mimeType: string, data: string} | null>(null);
+  const [generationMode, setGenerationMode] = useState<GenerationMode>('PROMPT');
   const [generationPrompt, setGenerationPrompt] = useState('');
+  const [userImage, setUserImage] = useState<File | null>(null);
+  const [userImageInstruction, setUserImageInstruction] = useState('');
   const [editInstruction, setEditInstruction] = useState('');
   
   // Global state
@@ -49,14 +54,12 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
 
   const hookPrompt = useMemo(() => {
     if (!scriptJob.hook) return "A dramatic moment from the story.";
-    // Simple extraction of the core action from the hook
     return scriptJob.hook.split('.')[0] + '.';
   }, [scriptJob.hook]);
   
   if (!isOpen) return null;
 
   const handleClose = () => {
-    // Reset state on close
     setStep('STYLE_SELECTION');
     setSelectedStyle(null);
     setStyleImages([]);
@@ -64,16 +67,25 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
     setAnalyzedStyle(null);
     setGeneratedImage(null);
     setGenerationPrompt('');
+    setGenerationMode('PROMPT');
+    setUserImage(null);
+    setUserImageInstruction('');
     setEditInstruction('');
     setError(null);
     setIsLoading(false);
     onClose();
   }
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleStyleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const files = Array.from(e.target.files).slice(0, 5);
       setStyleImages(files);
+    }
+  };
+
+  const handleUserImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+        setUserImage(e.target.files[0]);
     }
   };
 
@@ -125,19 +137,42 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
     }
   }
   
-  const handleGenerate = async () => {
+  const handleGenerateFromPrompt = async () => {
     if (!selectedStyle || !generationPrompt) return;
     setError(null);
     setIsLoading(true);
     setGeneratedImage(null);
     setLoadingMessage("Generating initial thumbnail concept...");
     try {
-      const imageData = await generateInitialThumbnail(generationPrompt, selectedStyle);
-      setGeneratedImage({ mimeType: 'image/jpeg', data: imageData });
+      const generatedImageResult = await generateInitialThumbnail(generationPrompt, selectedStyle);
+      setGeneratedImage(generatedImageResult);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to generate thumbnail.");
+      setError(e instanceof Error ? `Generation failed: ${e.message}` : "Failed to generate thumbnail.");
     } finally {
       setIsLoading(false);
+    }
+  }
+  
+  const handleGenerateFromImage = async () => {
+    if (!selectedStyle || !userImage) return;
+    setError(null);
+    setIsLoading(true);
+    setGeneratedImage(null);
+    setLoadingMessage("Applying style to your image with Nano Banana...");
+
+    try {
+        const { mimeType, data } = await fileToGenerativePart(userImage);
+        const instruction = userImageInstruction 
+            ? `Apply this edit: "${userImageInstruction}".`
+            : "Re-imagine this image in the defined dramatic style.";
+
+        const editedImage = await editThumbnail(data, mimeType, instruction, selectedStyle);
+        setGeneratedImage(editedImage);
+        setUserImageInstruction('');
+    } catch (e) {
+        setError(e instanceof Error ? `Generation failed: ${e.message}` : "Failed to generate from image.");
+    } finally {
+        setIsLoading(false);
     }
   }
 
@@ -147,11 +182,11 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
     setIsLoading(true);
     setLoadingMessage("Applying your edits with Nano Banana...");
     try {
-        const editedImageData = await editThumbnail(generatedImage.data, generatedImage.mimeType, editInstruction, selectedStyle);
-        setGeneratedImage({ mimeType: 'image/png', data: editedImageData }); // Nano Banana often returns PNG
+        const editedImage = await editThumbnail(generatedImage.data, generatedImage.mimeType, editInstruction, selectedStyle);
+        setGeneratedImage(editedImage);
         setEditInstruction('');
     } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to edit thumbnail.");
+        setError(e instanceof Error ? `Edit failed: ${e.message}` : "Failed to edit thumbnail.");
     } finally {
         setIsLoading(false);
     }
@@ -161,11 +196,18 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
     if (!generatedImage) return;
     const link = document.createElement('a');
     link.href = `data:${generatedImage.mimeType};base64,${generatedImage.data}`;
-    link.download = `${scriptJob.refinedTitle.replace(/\s/g, '_')}_thumbnail.jpg`;
+    const extension = generatedImage.mimeType.split('/')[1] || 'jpg';
+    link.download = `${scriptJob.refinedTitle.replace(/\s/g, '_')}_thumbnail.${extension}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   }
+
+  const TabButton: React.FC<{active: boolean, onClick: () => void, children: React.ReactNode}> = ({ active, onClick, children }) => (
+    <button onClick={onClick} className={`px-4 py-2 text-sm font-semibold transition-colors duration-200 w-full rounded-t-md ${active ? 'bg-gray-700 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+        {children}
+    </button>
+  );
 
   return (
     <div className="fixed inset-0 bg-gray-950 bg-opacity-90 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true">
@@ -218,11 +260,11 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
                   <p className="text-sm text-gray-400 mb-4">Upload up to 5 sample thumbnails to analyze and create a new reusable style.</p>
                   
                   <div className="p-4 border-2 border-dashed border-gray-600 rounded-lg text-center mb-4">
-                    <input type="file" id="style-images" multiple accept="image/*" onChange={handleFileChange} className="hidden" />
+                    <input type="file" id="style-images" multiple accept="image/*" onChange={handleStyleFileChange} className="hidden" />
                     <label htmlFor="style-images" className="cursor-pointer text-indigo-400 hover:text-indigo-300 font-semibold">
                       {styleImages.length > 0 ? `${styleImages.length} image(s) selected` : 'Choose Images'}
                     </label>
-                    <p className="text-xs text-gray-500 mt-1">PNG, JPG, GIF up to 10MB each</p>
+                    <p className="text-xs text-gray-500 mt-1">PNG, JPG up to 10MB each</p>
                   </div>
                   
                   {styleImages.length > 0 && !analyzedStyle && (
@@ -240,7 +282,7 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
                         </div>
                         <div className="flex gap-2">
                            <input type="text" value={styleName} onChange={e => setStyleName(e.target.value)} placeholder="Enter a name for this style" className="flex-grow bg-gray-700 border border-gray-600 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-                           <Button onClick={handleSaveStyle}>Save Style</Button>
+                           <Button onClick={handleSaveStyle} disabled={!styleName.trim()}>Save Style</Button>
                         </div>
                     </div>
                   )}
@@ -255,17 +297,38 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {/* Left Panel: Controls */}
                       <div className="space-y-4">
-                        <div>
-                          <label htmlFor="prompt" className="block text-sm font-medium text-gray-300 mb-1">Scene Prompt</label>
-                          <textarea id="prompt" rows={4} value={generationPrompt} onChange={e => setGenerationPrompt(e.target.value)} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-                          <Button onClick={handleGenerate} className="mt-2 w-full">Generate</Button>
+                        <div className="flex border-b border-gray-600">
+                            <TabButton active={generationMode === 'PROMPT'} onClick={() => setGenerationMode('PROMPT')}>From Scene Prompt</TabButton>
+                            <TabButton active={generationMode === 'UPLOAD'} onClick={() => setGenerationMode('UPLOAD')}>From Your Image</TabButton>
                         </div>
                         
+                        {generationMode === 'PROMPT' && (
+                            <div>
+                                <label htmlFor="prompt" className="block text-sm font-medium text-gray-300 mb-1">Scene Prompt</label>
+                                <textarea id="prompt" rows={4} value={generationPrompt} onChange={e => setGenerationPrompt(e.target.value)} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                                <Button onClick={handleGenerateFromPrompt} className="mt-2 w-full">Generate</Button>
+                            </div>
+                        )}
+                        
+                        {generationMode === 'UPLOAD' && (
+                            <div className="space-y-3">
+                                <label htmlFor="user-image" className="block text-sm font-medium text-gray-300">Upload Image</label>
+                                <div className="p-3 border-2 border-dashed border-gray-600 rounded-lg text-center">
+                                    <input type="file" id="user-image" accept="image/*" onChange={handleUserImageChange} className="hidden" />
+                                    <label htmlFor="user-image" className="cursor-pointer text-indigo-400 hover:text-indigo-300 font-semibold">{userImage ? userImage.name : 'Choose an Image'}</label>
+                                </div>
+                                
+                                <label htmlFor="user-instruction" className="block text-sm font-medium text-gray-300">Instruction (Optional)</label>
+                                <textarea id="user-instruction" rows={2} value={userImageInstruction} onChange={e => setUserImageInstruction(e.target.value)} placeholder="e.g., 'Add a burning car in the background'" className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                                <Button onClick={handleGenerateFromImage} className="w-full" disabled={!userImage}>Generate with Image</Button>
+                            </div>
+                        )}
+                        
                         {generatedImage && (
-                          <div className="border-t border-gray-700 pt-4">
+                          <div className="border-t border-gray-700 pt-4 animate-fade-in">
                              <label htmlFor="instruction" className="block text-sm font-medium text-gray-300 mb-1">Refine Image</label>
-                             <textarea id="instruction" rows={3} value={editInstruction} onChange={e => setEditInstruction(e.target.value)} placeholder="e.g., 'Make his expression angrier' or 'Add rain in the background'" className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-                             <Button onClick={handleEdit} className="mt-2 w-full" variant="secondary">Apply Edit</Button>
+                             <textarea id="instruction" rows={3} value={editInstruction} onChange={e => setEditInstruction(e.target.value)} placeholder="e.g., 'Make his expression angrier' or 'Add rain'" className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                             <Button onClick={handleEdit} className="mt-2 w-full" variant="secondary" disabled={!editInstruction.trim()}>Apply Edit</Button>
                           </div>
                         )}
                       </div>
@@ -281,7 +344,7 @@ const ThumbnailStudio: React.FC<ThumbnailStudioProps> = ({ isOpen, onClose, scri
                    </div>
                    {generatedImage && (
                     <div className="mt-6 text-center">
-                        <Button onClick={handleDownload} className="bg-green-600 hover:bg-green-500 focus:ring-green-500">Download Thumbnail (1280x720)</Button>
+                        <Button onClick={handleDownload} className="bg-green-600 hover:bg-green-500 focus:ring-green-500">Download Thumbnail</Button>
                     </div>
                    )}
                 </div>
